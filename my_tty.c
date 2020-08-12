@@ -8,6 +8,8 @@
 #include <linux/module.h>
 #include <linux/sched.h>
 #include <linux/serial_reg.h>
+#include <crypto/hash.h>
+
 
 #define DRIVER_AUTHOR "Alperen"
 #define DRIVER_DESC "TTY Driver"
@@ -22,21 +24,56 @@ MODULE_LICENSE("GPL");
 #define MY_TTY_MINOR 1
 
 
-#define HW_SIZE 128
+#define HW_SIZE 32
+
+
 
 struct mytty_serial{
   struct tty_struct *tty;
   struct file *filp;
   int open_count;
   struct semaphore sem;
-  char *hw_buffer;
+  unsigned  char *hw_buffer;
 };
-
 
 
 static struct mytty_serial *mytty_serial = NULL;
 
+struct sdesc {
+    struct shash_desc shash;
+    char ctx[];
+};
 
+static struct sdesc *init_sdesc(struct crypto_shash *alg)
+{
+    struct sdesc *sdesc;
+    int size;
+
+    size = sizeof(struct shash_desc) + crypto_shash_descsize(alg);
+    sdesc = kmalloc(size, GFP_KERNEL);
+    if (!sdesc)
+        return ERR_PTR(-ENOMEM);
+    sdesc->shash.tfm = alg;
+    return sdesc;
+}
+
+static int calc_hash(struct crypto_shash *alg,
+             const unsigned char *data, unsigned int datalen,
+             unsigned char *digest)
+{
+    struct sdesc *sdesc;
+    int ret;
+
+    sdesc = init_sdesc(alg);
+    if (IS_ERR(sdesc)) {
+      printk(KERN_INFO "can't alloc sdesc\n");
+      return PTR_ERR(sdesc);
+    }
+
+    ret = crypto_shash_digest(&sdesc->shash, data, datalen, digest);
+    kfree(sdesc);
+    return ret;
+}
 
 static int mytty_open(struct tty_struct *tty, struct file *filp)
 {
@@ -101,8 +138,9 @@ static int mytty_write(struct tty_struct *tty, const unsigned char *buf, int cou
 {
   struct mytty_serial *mytty;
   int ret_val = -EINVAL;
-  int c,c1;
-  
+  int i;
+  struct crypto_shash *alg;
+  char* hash_alg_name = "sha256";
   mytty = tty->driver_data;
   if (!mytty){
     return -ENODEV;
@@ -114,15 +152,25 @@ static int mytty_write(struct tty_struct *tty, const unsigned char *buf, int cou
     up (&mytty->sem);
     return -EINVAL;
   }
-  printk(KERN_INFO "%s char = %c\n",__func__,buf[0]);
-  c1 = 0;
-  for(c = 0; c<count; c++){
-    mytty->hw_buffer[c1] = buf[c];
-    c1 = (c1 + 1) % HW_SIZE;
-    tty_insert_flip_char(tty->port,buf[c],TTY_NORMAL);
+  alg = crypto_alloc_shash(hash_alg_name,0,0);
+  if (IS_ERR(alg)){
+    printk(KERN_ERR "can't alloc alg \%s\n",hash_alg_name);
+    return PTR_ERR(alg);
+  }
+  ret_val = calc_hash(alg,buf,count,mytty->hw_buffer);
+
+  for(i=0; i<32;i++){
+    printk(KERN_INFO "Index :%d HASH: %02x",i,mytty->hw_buffer[i]);
+  }
+  for(i=0; i<count;i++){
+    printk(KERN_INFO "Index :%d buffer:%c",i,buf[i]);
+  }
+  for (i = 0; i<32; i++){
+    tty_insert_flip_char(tty->port,mytty->hw_buffer[i],TTY_NORMAL);
   }
   tty_flip_buffer_push(tty->port);
   ret_val = count;
+  crypto_free_shash(alg);
   up(&mytty->sem);
   return ret_val;
 }
@@ -183,7 +231,7 @@ static int __init mytty_init(void)
 {
 
   mytty_tty_driver = alloc_tty_driver(MY_TTY_MINOR);
-
+ 
   if (!mytty_tty_driver) return -ENOMEM;
 
   mytty_tty_driver->magic = TTY_DRIVER_MAGIC;
