@@ -1,0 +1,3 @@
+/home/alperen/Desktop/ttymy/test_app/CMakeFiles/rebuild_cache.dir
+/home/alperen/Desktop/ttymy/test_app/CMakeFiles/test_app.dir
+/home/alperen/Desktop/ttymy/test_app/CMakeFiles/edit_cache.dir

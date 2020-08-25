@@ -1,0 +1,355 @@
+#include <linux/uaccess.h>
+#include <linux/kernel.h>
+#include <linux/errno.h>
+#include <linux/slab.h>
+#include <linux/tty.h>
+#include <linux/tty_driver.h>
+#include <linux/tty_flip.h>
+#include <linux/module.h>
+#include <linux/sched.h>
+#include <linux/serial_reg.h>
+#include <crypto/hash.h>
+
+
+#define DRIVER_AUTHOR "Alperen"
+#define DRIVER_DESC "TTY Driver"
+
+
+MODULE_AUTHOR( DRIVER_AUTHOR );
+MODULE_DESCRIPTION( DRIVER_DESC );
+MODULE_LICENSE("GPL");
+
+
+#define MY_TTY_MAJOR 255
+#define MY_TTY_MINOR 1
+
+
+#define HW_SIZE 32
+
+
+
+struct mytty_serial{
+  struct tty_struct *tty;
+  struct file *filp;
+  int open_count;
+  struct semaphore sem;
+  unsigned char *hw_buffer;
+};
+
+
+static struct mytty_serial *mytty_serial = NULL;
+
+struct sdesc {
+    struct shash_desc shash;
+    char ctx[];
+};
+
+static struct sdesc *init_sdesc(struct crypto_shash *alg)
+{
+    struct sdesc *sdesc;
+    int size;
+
+    size = sizeof(struct shash_desc) + crypto_shash_descsize(alg);
+
+    sdesc = kmalloc(size, GFP_KERNEL);
+
+    if (!sdesc)
+        return ERR_PTR(-ENOMEM);
+
+    sdesc->shash.tfm = alg;
+
+    return sdesc;
+}
+
+static int calc_hash(struct crypto_shash *alg,
+             const unsigned char *data, unsigned int datalen,
+             unsigned char *digest)
+{
+    struct sdesc *sdesc;
+    int ret;
+
+    sdesc = init_sdesc(alg);
+
+    if (IS_ERR(sdesc)) {
+
+      printk(KERN_INFO "can't alloc sdesc\n");
+
+      return PTR_ERR(sdesc);
+    }
+
+
+    ret = crypto_shash_digest(&sdesc->shash, data, datalen, digest);
+
+    kfree(sdesc);
+
+    return ret;
+}
+
+static int mytty_open(struct tty_struct *tty, struct file *filp)
+{
+  
+
+  tty->driver_data = NULL;
+
+
+  if (NULL == mytty_serial){
+
+    mytty_serial = kmalloc(sizeof(*mytty_serial),GFP_KERNEL);
+
+    if ( NULL == mytty_serial){
+      return -ENOMEM;
+    }
+
+    mytty_serial->hw_buffer = kmalloc(HW_SIZE,GFP_KERNEL);
+
+    if (!mytty_serial->hw_buffer){
+      kfree(mytty_serial);
+      return -ENOMEM;
+    }
+
+    sema_init(&mytty_serial->sem,1);
+
+    mytty_serial->open_count = 0;
+  }
+
+  down(&mytty_serial->sem);
+
+  tty->driver_data = mytty_serial;
+
+  mytty_serial->tty = tty;
+
+  mytty_serial->filp = filp;
+
+
+  ++mytty_serial->open_count;
+
+  up(&mytty_serial->sem);
+
+  return 0;
+}
+
+static void do_close(struct mytty_serial *my_serial)
+{
+
+  down(&my_serial->sem);
+
+  if (0 == my_serial->open_count) return;
+
+  --my_serial->open_count;
+
+  up(&my_serial->sem);
+
+}
+
+static void mytty_close(struct tty_struct *tty, struct file *filp)
+{
+  struct mytty_serial *my_serial;
+
+  my_serial = tty->driver_data;
+
+  printk(KERN_INFO "%s \n",__func__);
+
+  if (!my_serial) return;
+
+  if (my_serial) do_close(my_serial);
+}
+
+static int mytty_write(struct tty_struct *tty, const unsigned char *buf, int count)
+{
+  struct mytty_serial *mytty;
+  int ret_val = -EINVAL;
+  int i;
+  struct crypto_shash *alg;
+  char* hash_alg_name = "sha256";
+  char *tmp;
+  
+  printk(KERN_INFO "%s\n",__func__);
+  
+  tmp = kmalloc(sizeof(unsigned char)*2,GFP_KERNEL);
+
+  if (IS_ERR(tmp)) return -ENOMEM;
+
+  mytty = tty->driver_data;
+
+  if (!mytty){
+    return -ENODEV;
+  }
+
+  down(&mytty->sem);
+
+  if (!mytty->open_count){
+    up (&mytty->sem);
+    return -EINVAL;
+  }
+  
+  if('\n' == buf[count-1]){
+    count--;
+  }
+  
+  alg = crypto_alloc_shash(hash_alg_name,0,0);
+
+  if (IS_ERR(alg)){
+
+    printk(KERN_ERR "can't alloc alg \%s\n",hash_alg_name);
+
+    return PTR_ERR(alg);
+  }
+
+  ret_val = calc_hash(alg,buf,count,mytty->hw_buffer);
+
+  for (i = 0; i<count;i++){
+    printk(KERN_INFO "Receive Buffer : %c \n",buf[i]);
+  }
+
+  for (i = 0; i<32; i++){
+
+    sprintf(tmp,"%02x",(unsigned char)mytty->hw_buffer[i]);
+
+    // Not an elagant way but here it goes
+    tty_insert_flip_char(tty->port,*tmp,TTY_NORMAL);
+    //printk(KERN_INFO " count:%d input : %c temp: %c%c hw_buffer: %02x\n",count,buf[i % count],*tmp,*(tmp+1),mytty->hw_buffer[i]);
+    tty_insert_flip_char(tty->port,*(tmp+1),TTY_NORMAL);
+  }
+  tty_insert_flip_char(tty->port,'\r',TTY_NORMAL);
+  tty_insert_flip_char(tty->port,'\n',TTY_NORMAL);
+  tty_flip_buffer_push(tty->port);
+
+  ret_val = count;
+
+  crypto_free_shash(alg);
+
+  kfree(tmp);
+
+  up(&mytty->sem);
+
+  return ret_val;
+}
+
+
+static int mytty_write_room(struct tty_struct *tty)
+{
+  struct mytty_serial *mytty = tty->driver_data;
+  int room;
+  if (!mytty) return -ENODEV;
+
+  down(&mytty->sem);
+  if (!mytty->open_count){
+    return -EINVAL;
+  }
+  up(&mytty->sem);
+  room = 255;
+  return room;
+}
+
+static int mytty_install(struct tty_driver *driver, struct tty_struct *tty)
+{
+
+  tty->port = kmalloc(sizeof(*tty->port),GFP_KERNEL);
+  if (!tty->port){
+    return -ENOMEM;
+  }
+
+  tty_init_termios(tty);
+  driver->ttys[0] = tty;
+
+  tty_port_init(tty->port);
+  tty_buffer_set_limit(tty->port, 8192);
+  tty_driver_kref_get(driver);
+  tty->count++;
+
+
+  return 0;
+}
+
+static struct tty_operations serial_ops = {
+  .open = mytty_open,
+  .close = mytty_close,
+  .write = mytty_write,
+  .write_room = mytty_write_room,
+  .install = mytty_install
+};
+
+static struct tty_driver *mytty_tty_driver;
+
+static int __init mytty_init(void)
+{
+
+  mytty_tty_driver = alloc_tty_driver(MY_TTY_MINOR);
+ 
+  if (!mytty_tty_driver) return -ENOMEM;
+
+  mytty_tty_driver->magic = TTY_DRIVER_MAGIC;
+  mytty_tty_driver->owner = THIS_MODULE;
+  mytty_tty_driver->driver_name = "mytty_driver";
+  mytty_tty_driver->name = "mytty";
+  mytty_tty_driver->major = MY_TTY_MAJOR;
+  mytty_tty_driver->num = MY_TTY_MINOR;
+  mytty_tty_driver->type = TTY_DRIVER_TYPE_SERIAL;
+  mytty_tty_driver->subtype = SERIAL_TYPE_NORMAL;
+  mytty_tty_driver->flags = TTY_DRIVER_REAL_RAW | TTY_DRIVER_DYNAMIC_DEV | TTY_DRIVER_UNNUMBERED_NODE;
+  mytty_tty_driver->init_termios = tty_std_termios;
+
+  /* mytty_tty_driver->init_termios.c_cflag = B9600 | CS8 | CREAD | HUPCL | CLOCAL;
+  mytty_tty_driver->init_termios.c_lflag &= ~(ECHO | ICANON | IEXTEN | ISIG);
+  mytty_tty_driver->init_termios.c_iflag = (IGNCR | INLCR);
+  mytty_tty_driver->init_termios.c_iflag &= ~(BRKINT | ICRNL | INPCK | ISTRIP | IXON);
+  mytty_tty_driver->init_termios.c_oflag &= ~(OPOST);*/
+
+  mytty_tty_driver->init_termios.c_cflag |= CLOCAL | CREAD;
+  mytty_tty_driver->init_termios.c_cflag &= ~CSIZE;
+  mytty_tty_driver->init_termios.c_cflag |= CS8;         
+  mytty_tty_driver->init_termios.c_cflag &= ~PARENB;     
+  mytty_tty_driver->init_termios.c_cflag &= ~CSTOPB;     
+  mytty_tty_driver->init_termios.c_cflag &= ~CRTSCTS;   
+  mytty_tty_driver->init_termios.c_cflag |= B9600;
+    
+  mytty_tty_driver->init_termios.c_lflag |= ICANON | ISIG; 
+  mytty_tty_driver->init_termios.c_lflag &= ~(ECHO | ECHOE | ECHONL | IEXTEN);
+
+  mytty_tty_driver->init_termios.c_iflag &= ~IGNCR;  
+  mytty_tty_driver->init_termios.c_iflag &= ~INPCK;
+  mytty_tty_driver->init_termios.c_iflag &= ~(ICRNL | IUCLC | IMAXBEL);
+  mytty_tty_driver->init_termios.c_iflag &= ~(IXON | IXOFF | IXANY); 
+
+  mytty_tty_driver->init_termios.c_oflag &= ~OPOST;
+
+  mytty_tty_driver->init_termios.c_cc[VEOL] = 0;
+  mytty_tty_driver->init_termios.c_cc[VEOL2] = 0;
+  mytty_tty_driver->init_termios.c_cc[VEOF] = 0x04;
+
+  tty_set_operations(mytty_tty_driver,&serial_ops);
+
+  
+
+  if (tty_register_driver(mytty_tty_driver)){
+    printk(KERN_ERR "failed to register mytty driver \n");
+    put_tty_driver (mytty_tty_driver);
+    return -1;
+  }
+  tty_register_device(mytty_tty_driver,0,NULL);
+  printk(KERN_INFO "Mytty driver is running \n");
+  return 0;
+}
+
+static void __exit mytty_exit(void)
+{
+
+  tty_unregister_device(mytty_tty_driver,0);
+  tty_unregister_driver(mytty_tty_driver);
+
+  if (mytty_serial){
+    while(mytty_serial->open_count){
+      do_close(mytty_serial);
+    }
+    if (mytty_serial->tty->port){
+      kfree(mytty_serial->tty->port);
+      mytty_serial->tty->port = NULL;
+    }
+    kfree(mytty_serial);
+    mytty_serial = NULL;
+  }
+  printk(KERN_INFO "Mytty driver exit\n");
+}
+
+module_init(mytty_init);
+module_exit(mytty_exit);

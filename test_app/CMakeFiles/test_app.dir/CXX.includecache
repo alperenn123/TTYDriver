@@ -1,0 +1,22 @@
+#IncludeRegexLine: ^[ 	]*[#%][ 	]*(include|import)[ 	]*[<"]([^">]+)([">])
+
+#IncludeRegexScan: ^.*$
+
+#IncludeRegexComplain: ^$
+
+#IncludeRegexTransform: 
+
+/home/alperen/Desktop/ttymy/test_app/main.cpp
+serial.h
+/home/alperen/Desktop/ttymy/test_app/serial.h
+iostream
+-
+
+/home/alperen/Desktop/ttymy/test_app/serial.cpp
+serial.h
+/home/alperen/Desktop/ttymy/test_app/serial.h
+
+/home/alperen/Desktop/ttymy/test_app/serial.h
+asio.hpp
+/home/alperen/Desktop/ttymy/test_app/asio.hpp
+

@@ -88,7 +88,6 @@ static int calc_hash(struct crypto_shash *alg,
 static int mytty_open(struct tty_struct *tty, struct file *filp)
 {
   
-  printk(KERN_INFO "%s\n",__func__);
 
   tty->driver_data = NULL;
 
@@ -131,7 +130,6 @@ static int mytty_open(struct tty_struct *tty, struct file *filp)
 
 static void do_close(struct mytty_serial *my_serial)
 {
-  printk(KERN_INFO "%s\n",__func__);
 
   down(&my_serial->sem);
 
@@ -167,7 +165,7 @@ static int mytty_write(struct tty_struct *tty, const unsigned char *buf, int cou
   
   printk(KERN_INFO "%s\n",__func__);
   
-  tmp = kmalloc(sizeof(unsigned char)*4,GFP_KERNEL);
+  tmp = kmalloc(sizeof(unsigned char)*2,GFP_KERNEL);
 
   if (IS_ERR(tmp)) return -ENOMEM;
 
@@ -183,7 +181,11 @@ static int mytty_write(struct tty_struct *tty, const unsigned char *buf, int cou
     up (&mytty->sem);
     return -EINVAL;
   }
-
+  
+  if('\n' == buf[count-1]){
+    count--;
+  }
+  
   alg = crypto_alloc_shash(hash_alg_name,0,0);
 
   if (IS_ERR(alg)){
@@ -193,31 +195,18 @@ static int mytty_write(struct tty_struct *tty, const unsigned char *buf, int cou
     return PTR_ERR(alg);
   }
 
-  ret_val = calc_hash(alg,buf,count-1,mytty->hw_buffer);
-
-  for(i=0; i<32;i++){
-
-    printk(KERN_INFO "Index :%d HASH: %02x",i,mytty->hw_buffer[i]);
-
-  }
-
-  for(i=0; i<count;i++){
-
-    printk(KERN_INFO "Index :%d buffer:%c",i,buf[i]);
-
-  };
+  ret_val = calc_hash(alg,buf,count,mytty->hw_buffer);
 
   for (i = 0; i<32; i++){
 
     sprintf(tmp,"%02x",(unsigned char)mytty->hw_buffer[i]);
 
-    printk(KERN_INFO "value %s",tmp);
     // Not an elagant way but here it goes
     tty_insert_flip_char(tty->port,*tmp,TTY_NORMAL);
-
     tty_insert_flip_char(tty->port,*(tmp+1),TTY_NORMAL);
   }
-  
+  tty_insert_flip_char(tty->port,'\r',TTY_NORMAL);
+  tty_insert_flip_char(tty->port,'\n',TTY_NORMAL);
   tty_flip_buffer_push(tty->port);
 
   ret_val = count;
@@ -249,7 +238,6 @@ static int mytty_write_room(struct tty_struct *tty)
 
 static int mytty_install(struct tty_driver *driver, struct tty_struct *tty)
 {
-  printk(KERN_INFO "%s\n",__func__);
 
   tty->port = kmalloc(sizeof(*tty->port),GFP_KERNEL);
   if (!tty->port){
@@ -268,16 +256,11 @@ static int mytty_install(struct tty_driver *driver, struct tty_struct *tty)
   return 0;
 }
 
-static void mytty_set_termios(struct tty_struct * tty, struct ktermios *old_termios)
-{
-  printk(KERN_INFO "%s\n",__func__);
-}
 static struct tty_operations serial_ops = {
   .open = mytty_open,
   .close = mytty_close,
   .write = mytty_write,
   .write_room = mytty_write_room,
-  .set_termios = mytty_set_termios,
   .install = mytty_install
 };
 
@@ -300,10 +283,28 @@ static int __init mytty_init(void)
   mytty_tty_driver->subtype = SERIAL_TYPE_NORMAL;
   mytty_tty_driver->flags = TTY_DRIVER_REAL_RAW | TTY_DRIVER_DYNAMIC_DEV | TTY_DRIVER_UNNUMBERED_NODE;
   mytty_tty_driver->init_termios = tty_std_termios;
-  mytty_tty_driver->init_termios.c_cflag = B115200 | CS8 | CREAD | HUPCL |CLOCAL;
-  mytty_tty_driver->init_termios.c_lflag &= ~(ECHO | ICANON | IEXTEN | ISIG);
-  mytty_tty_driver->init_termios.c_iflag &= ~(BRKINT | ICRNL | INPCK | ISTRIP | IXON);
-  mytty_tty_driver->init_termios.c_oflag &= ~(OPOST);
+
+  mytty_tty_driver->init_termios.c_cflag |= CLOCAL | CREAD;
+  mytty_tty_driver->init_termios.c_cflag &= ~CSIZE;
+  mytty_tty_driver->init_termios.c_cflag |= CS8;         
+  mytty_tty_driver->init_termios.c_cflag &= ~PARENB;     
+  mytty_tty_driver->init_termios.c_cflag &= ~CSTOPB;     
+  mytty_tty_driver->init_termios.c_cflag &= ~CRTSCTS;   
+  mytty_tty_driver->init_termios.c_cflag |= B9600;
+    
+  mytty_tty_driver->init_termios.c_lflag |= ICANON | ISIG; 
+  mytty_tty_driver->init_termios.c_lflag &= ~(ECHO | ECHOE | ECHONL | IEXTEN);
+
+  mytty_tty_driver->init_termios.c_iflag &= ~IGNCR;  
+  mytty_tty_driver->init_termios.c_iflag &= ~INPCK;
+  mytty_tty_driver->init_termios.c_iflag &= ~(ICRNL | IUCLC | IMAXBEL);
+  mytty_tty_driver->init_termios.c_iflag &= ~(IXON | IXOFF | IXANY); 
+
+  mytty_tty_driver->init_termios.c_oflag &= ~OPOST;
+
+  mytty_tty_driver->init_termios.c_cc[VEOL] = 0;
+  mytty_tty_driver->init_termios.c_cc[VEOL2] = 0;
+  mytty_tty_driver->init_termios.c_cc[VEOF] = 0x04;
 
   tty_set_operations(mytty_tty_driver,&serial_ops);
 
@@ -321,8 +322,6 @@ static int __init mytty_init(void)
 
 static void __exit mytty_exit(void)
 {
-
-  printk(KERN_INFO "%s\n",__func__);
 
   tty_unregister_device(mytty_tty_driver,0);
   tty_unregister_driver(mytty_tty_driver);

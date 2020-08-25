@@ -1,0 +1,1 @@
+cmd_/home/alperen/Desktop/ttymy/tty_driver/my_tty.ko := ld -r -m elf_x86_64  -z max-page-size=0x200000  --build-id  -T ./scripts/module-common.lds -o /home/alperen/Desktop/ttymy/tty_driver/my_tty.ko /home/alperen/Desktop/ttymy/tty_driver/my_tty.o /home/alperen/Desktop/ttymy/tty_driver/my_tty.mod.o;  true

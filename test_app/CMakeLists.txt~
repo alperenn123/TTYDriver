@@ -1,0 +1,25 @@
+cmake_minimum_required(VERSION 3.1)
+
+project(MyttyTest)
+SET( CMAKE_C_FLAGS "-Wall -q" )
+
+set(CMAKE_CXX_STANDARD 11)
+
+set(SRCS main.cpp serial.cpp)
+
+add_definitions(-DBOOST_ERROR_CODE_HEADER_ONLY)
+
+add_executable(mytty_test ${SRCS})
+
+## Link libraries
+
+set(BOOST_LIBS date_time system)
+find_package(Boost COMPONENTS ${BOOST_LIBS} REQUIRED)
+
+if( Boost_FOUND )
+    message( STATUS "Boost found!" )
+endif()
+
+target_link_libraries(mytty_test ${Boost_LIBRARIES})
+find_package(Threads REQUIRED)
+target_link_libraries(mytty_test ${CMAKE_THREAD_LIBS_INIT})

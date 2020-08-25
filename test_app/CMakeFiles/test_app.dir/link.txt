@@ -1,0 +1,1 @@
+/usr/bin/c++ -lpthread CMakeFiles/test_app.dir/main.cpp.o CMakeFiles/test_app.dir/serial.cpp.o -o test_app 
